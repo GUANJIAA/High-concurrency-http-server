@@ -9,9 +9,9 @@
 #define SERVER_PORT 80
 static int debug = 1;
 
-void do_http_request(int client_sock);
 int get_line(int socket,char *buf,int size);
-
+void do_http_request(int client_sock);
+void do_http_response(int client_sock);
 int main(){
 	
 	int lfd=socket(AF_INET, SOCK_STREAM, 0);
@@ -63,7 +63,7 @@ void do_http_request(int client_sock){
 
 	if(len>0){
 		int i=0,j=0;
-		while(!isspace(buf[j])&&i<sizeof(method)-1){
+		while(!isspace(buf[j])&&(i<sizeof(method)-1)){
 			method[i]=buf[j];
 			i++;
 			j++;
@@ -78,7 +78,7 @@ void do_http_request(int client_sock){
 			
 			while(isspace(buf[j++]));
 			i=0;
-			while(!isspace(buf[j])&&i<sizeof(url)-1){
+			while(!isspace(buf[j])&&(i<sizeof(url)-1)){
 				url[i]=buf[j];
 				i++;
 				j++;
@@ -107,6 +107,7 @@ void do_http_request(int client_sock){
 			if(debug)
 				printf("path:%s\n",path);
 
+			do_http_response(client_sock);
 		}else {
 			fprintf(stderr,"warning other request [%s]\n",method);
 			do{
@@ -118,6 +119,51 @@ void do_http_request(int client_sock){
 	}else{
 		
 	}
+}
+
+void do_http_response(int client_sock){
+	const char * main_header = "HTTP/1.0 200 OK\r\nServer: Martin Server\r\nContent-Type: text/html\r\nConnection: Close\r\n";
+	const char * welcome_content = "\
+<html lang=\"zh-CN\">\n\
+<head>\n\
+<meta content=\"text/html;charset=utf-8\"http-equiv=\"Content-Type\">\n\
+<title>This is a test</title>\n\
+</head>\n\
+<body>\n\
+<div align=center height=\"500px\">\n\
+<br/><br/><br/>\n\
+<h2>GUANJIAA!</h2><br/><br/>\n\
+<from action=\"commit\"method=\"post\">\n\
+name:<input type=\"text\" name=\"name\"/>\n\
+<br/>age:<input type=\"password\" name=\"age\"/>\n\
+<br/><br/><br/><input type=\"submit\" value=\"submit\"/>\n\
+<input type=\"reset\" value=\"reset\"/>\n\
+</form>\n\
+</div>\n\
+</body>\n\
+</html>\n\
+";
+	
+	int len=write(client_sock,main_header,strlen(main_header));
+
+	if(debug)
+		fprintf(stdout,"...do_http_response...\n");
+	if(debug)
+		fprintf(stdout,"write[%d]:%s",len,main_header);
+
+	char send_buf[64];
+	int wc_len=strlen(welcome_content);
+	len = snprintf(send_buf,64,"Content-Length:%d\r\n\r\n",wc_len);
+	len =write(client_sock,send_buf,len);
+
+	if(debug)
+		fprintf(stdout,"write[%d]:%s",len,send_buf);
+
+	len = write(client_sock,welcome_content,wc_len);
+	
+	if(debug)
+		fprintf(stdout,"write[%d]:%s",len,welcome_content);
+
 }
 
 int get_line(int socket,char *buf,int size){
