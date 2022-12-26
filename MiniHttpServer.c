@@ -1,4 +1,5 @@
 #include<stdio.h>
+#include<pthread.h>
 #include<unistd.h>
 #include<sys/types.h>
 #include<sys/socket.h>
@@ -13,9 +14,15 @@
 static int debug = 1;
 
 int get_line(int socket,char *buf,int size);
-void do_http_request(int client_sock);
-void do_http_response(int client_sock);
-void not_found(int client_sock);
+void *do_http_request(void *pclient_sock);
+void do_http_response(int client_sock,const char *path);
+void do_http_response1(int client_sock);
+void not_found(int client_sock);//404
+void unimplemented(int client_sock);
+void bad_request(int client_sock);
+int headers(int client_sock,FILE *resource);
+void cat(int client_sock,FILE *resource);
+void inner_error(int client_sock);
 int main(){
 	
 	int lfd=socket(AF_INET, SOCK_STREAM, 0);
@@ -38,7 +45,9 @@ int main(){
 		int cfd,len,i;
 		char client_ip[64];
 		char buf[1024];
-		
+		pthread_t id;
+		int *pclient_sock=NULL;
+
 		socklen_t socklen;
 		socklen=sizeof(client);
 		cfd = accept(lfd,(struct sockaddr*)&client,&socklen);
@@ -47,20 +56,23 @@ int main(){
 				inet_ntop(AF_INET,&client.sin_addr.s_addr,client_ip,sizeof(client_ip)),
 				ntohs(client.sin_port));
 
-		do_http_request(cfd);
-		close(cfd);
+		//do_http_request(cfd);
+		pclient_sock=(int *)malloc(sizeof(int));
+		*pclient_sock=cfd;
+		pthread_create(&id,NULL,do_http_request,(void *)pclient_sock);
 	}
 	close(lfd);
 	return 0;
 }
 
-void do_http_request(int client_sock){
+void *do_http_request(void *pclient_sock){
 	
 	int len=0;
 	char buf[256];
 	char method[64];
 	char url[256];
 	char path[256];
+	int client_sock=*(int *)pclient_sock;
 
 	struct stat st;
 	memset(buf,0x00,sizeof(buf));
@@ -113,9 +125,14 @@ void do_http_request(int client_sock){
 				printf("path:%s\n",path);
 			
 			if(stat(path,&st)==-1){
+				fprintf(stderr,"stat %s failed.reason:\n",path);
 				not_found(client_sock);
 			}else {
-				do_http_response(client_sock);	
+				if(S_ISDIR(st.st_mode)){
+					strcat(path,"/index.html");
+				}
+
+				do_http_response(client_sock,path);	
 			}
 		}else {
 			fprintf(stderr,"warning other request [%s]\n",method);
@@ -124,13 +141,78 @@ void do_http_request(int client_sock){
 				if(debug)
 					printf("read:%s\n",buf);
 			}while(len>0);
+			unimplemented(client_sock);			
 		}
 	}else{
-		
+		bad_request(client_sock);		
+	}
+	close(client_sock);
+	if(pclient_sock)
+		free(pclient_sock);
+	return NULL;
+}
+
+void do_http_response(int client_sock,const char *path){
+	int ret=0;
+	FILE *resource=NULL;
+
+	resource=fopen(path,"r");
+
+	if(resource==NULL){
+		not_found(client_sock);
+		return ;
+	}
+
+	ret=headers(client_sock,resource);
+	
+	if(!ret)
+		cat(client_sock,resource);
+
+	fclose(resource);
+}
+int headers(int client_sock,FILE *resource){
+	struct stat st;
+	int fileid=0;
+	char tmp[64];
+	char buf[1024]={0};
+	strcpy(buf,"HTTP/1.0 200 OK\r\nServer: Martin Server\r\nContent-Type: text/html\r\nConnection:Close\r\n");
+
+	fileid=fileno(resource);
+
+	if(fstat(fileid,&st)==-1){
+		inner_error(client_sock);
+		return -1;
+	}
+
+	snprintf(tmp,64,"Content_Length:%ld\r\n\r\n",st.st_size);
+	strcat(buf,tmp);
+	if(debug)
+		fprintf(stdout,"header:%s\n",buf);
+
+	if(send(client_sock,buf,strlen(buf),0)<0){
+		fprintf(stderr,"send failed.data:%s,reason:\n",buf);
+		return -1;
+	}
+	return 0;
+}
+void cat(int client_sock,FILE *resource){
+	char buf[1024];
+
+	fgets(buf,sizeof(buf),resource);
+
+	while(!feof(resource)){
+		int len = write(client_sock,buf,strlen(buf));
+		if(len<0){
+			fprintf(stderr,"send body error. reason:%s\n",strerror(errno));
+			break;
+		}
+		if(debug)
+			fprintf(stdout,"%s",buf);
+		fgets(buf,sizeof(buf),resource);
 	}
 }
 
-void do_http_response(int client_sock){
+void do_http_response1(int client_sock){
 	const char * main_header = "HTTP/1.0 200 OK\r\nServer: Martin Server\r\nContent-Type: text/html\r\nConnection: Close\r\n";
 	const char * welcome_content = "\
 <html lang=\"zh-CN\">\n\
@@ -209,18 +291,18 @@ int get_line(int socket,char *buf,int size){
 
 void not_found(int client_sock){
 	const char * reply = "HTTP/1.0 404 NOT FOUND\r\n\
-						  Content-Type: text/html\r\n\
-						  \r\n\
-						  <HTML lang=\"zh-CN\">\r\n\
-						  <meta content=\"text/html;charset=utf-8\"http-equiv=\"Content-Type\">\r\n\
-						  <HEAD>\r\n\
-						  <TITLE>NOT FOUND</TITLE>\r\n\
-						  </HEAD>\r\n\
-						  <BODY>\r\n\
-							<P>文件不存在！！！\r\n\
-							<P>The server could not fulfill your request becase the resource specified is unavailable or nonexitent.\r\n\
-						  </BODY>\r\n\
-						  </HTML>";
+Content-Type: text/html\r\n\
+\r\n\
+<HTML lang=\"zh-CN\">\r\n\
+<meta content=\"text/html;charset=utf-8\"http-equiv=\"Content-Type\">\r\n\
+<HEAD>\r\n\
+<TITLE>NOT FOUND</TITLE>\r\n\
+</HEAD>\r\n\
+<BODY>\r\n\
+	<P>文件不存在！！！\r\n\
+	<P>The server could not fulfill your request becase the resource specified is unavailable or nonexitent.\r\n\
+</BODY>\r\n\
+</HTML>";
 
 	int len=write(client_sock,reply,strlen(reply));
 	if(debug)
@@ -228,4 +310,67 @@ void not_found(int client_sock){
 	if(len<=0)
 		fprintf(stderr,"send reply failed.reason:%s\n",strerror(errno));
 
+}
+
+void inner_error(int client_sock){
+	const char *reply="HTTP/1.0 500 Internal Server Error\r\n\
+Content_Type: text/html\r\n\
+\r\n\
+<HTML lang=\"zh-CN\">\r\n\
+<meta content=\"text/html;charset=utf-8\"http-equiv=\"Content-Type\">\r\n\
+<HTML>\r\n\
+<HEAD>\r\n\
+<TITLE>Inner Error</TITLE>\r\n\
+</HEAD>\r\n\
+<BODY>\r\n\
+	<P>Server internal error.\r\n\
+</BODY>\r\n\
+</HTML>";
+	int len=write(client_sock,reply,strlen(reply));
+	if(debug)
+		fprintf(stdout,reply);
+	if(len<=0){
+		fprintf(stderr,"send reply failed.reason:%s\n",strerror(errno));
+	}
+}
+
+void unimplemented(int client_sock){
+	const char * reply = "HTTP/1.0 501 Method Implemented\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<HTML>\r\n\
+<HEAD>\r\n\
+<TITLE>Method Not Implemented</TITLE>\r\n\
+</HEAD>\r\n\
+<BODY>\r\n\
+	<P>HTTP REQUEST METHOD NOT SUPPORTED.\r\n\
+</BODY>\r\n\
+</HTML>";
+
+	int len=write(client_sock,reply,strlen(reply));
+	if(debug)
+		fprintf(stdout,reply);
+	if(len<=0){
+		fprintf(stderr,"send reply failed.reason:%s\n",strerror(errno));
+	}
+}
+
+void bad_request(int client_sock){
+	const char * reply = "HTTP/1.0 400 BAD REQUEST\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<HTML>\r\n\
+<HEAD>\r\n\
+<TITLE>BAD REQUEST</TITLE>\r\n\
+</HEAD>\r\n\
+<BODY>\r\n\
+    <P>your browser sent a bad request! \r\n\
+</BODY>\r\n\
+</HTML>";
+	int len=write(client_sock,reply,strlen(reply));
+	if(debug)
+		fprintf(stdout,reply);
+	if(len<=0){
+		fprintf(stderr,"send reply failed.reason:%s\n",strerror(errno));
+	}
 }
